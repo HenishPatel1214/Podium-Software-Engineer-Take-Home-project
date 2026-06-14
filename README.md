@@ -4,15 +4,6 @@
 
 A config-driven HTTP API gateway built from scratch in Python. Reads a `gateway.yaml` file and handles routing, rate limiting, retries, transforms, auth, and circuit breaking — no proxy frameworks used.
 
----
-
-## Prerequisites
-
-- Python 3.10+
-- PyYAML and pytest (both in `requirements.txt`)
-
----
-
 ## Setup
 
 ```bash
@@ -77,6 +68,3 @@ Tests spin up the gateway and all mock upstream servers in-process — no extern
 - [x] Circuit breaker — trips after N failures in a window, returns 503 with `retry_after`
 - [x] Load balancing — round robin and weighted round robin across multiple upstream targets
 
-## Not Implemented
-
-- Upstream health checks (`health_check.path` / `interval` / `unhealthy_threshold`): requires a background polling loop per upstream target running outside the request path. Deprioritized in favor of completing the other resilience features cleanly. Documented in `DECISIONS.md`.
