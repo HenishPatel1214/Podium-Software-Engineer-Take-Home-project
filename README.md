@@ -1,26 +1,50 @@
 # GatewayKit
 
-A lightweight, config-driven API gateway built from scratch in Python.
+**Henish Patel** — Podium SWE Take-Home
+
+A config-driven HTTP API gateway built from scratch in Python. Reads a `gateway.yaml` file and handles routing, rate limiting, retries, transforms, auth, and circuit breaking — no proxy frameworks used.
+
+---
+
+## Prerequisites
+
+- Python 3.10+
+- PyYAML and pytest (both in `requirements.txt`)
+
+---
 
 ## Setup
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+---
+
 ## Running the Gateway
+
+Pass the config file as a CLI argument:
 
 ```bash
 python main.py gateway.yaml
 ```
 
-Or with an environment variable:
+Or use the environment variable:
 
 ```bash
 GATEWAY_CONFIG=gateway.yaml python main.py
 ```
 
-The gateway starts on the port defined in your config (default 8080).
+The gateway starts on the port defined in the config (default 8080). Hit `GET /health` to confirm it's up:
+
+```bash
+curl http://localhost:8080/health
+# {"status": "healthy", "uptime_seconds": 4}
+```
+
+---
 
 ## Running the Tests
 
@@ -28,37 +52,31 @@ The gateway starts on the port defined in your config (default 8080).
 pytest tests/ -v
 ```
 
-Tests spin up the gateway and mock upstream servers in-process — no external processes needed.
+Tests spin up the gateway and all mock upstream servers in-process — no external services needed. All 21 tests should pass.
+
+---
 
 ## Implemented Features
 
-- [x] Config loading from YAML (CLI arg or `GATEWAY_CONFIG` env var)
+- [x] Config loading from YAML via CLI arg or `GATEWAY_CONFIG` env var
 - [x] `GET /health` — always returns `{"status": "healthy", "uptime_seconds": <int>}`
-- [x] Basic proxying — forwards requests to upstream, returns response
-- [x] 404 for unmatched routes
-- [x] 405 for disallowed HTTP methods
-- [x] `strip_prefix` — strips route path prefix before forwarding
-- [x] Per-route timeout override + global timeout fallback
+- [x] Route matching with prefix anchoring (no false matches on `/api/users-old`)
+- [x] 404 for unmatched routes, 405 for disallowed methods
+- [x] `strip_prefix` — strips the route prefix before forwarding to upstream
+- [x] Global timeout with per-route override
 - [x] Rate limiting — fixed window strategy
 - [x] Rate limiting — sliding window strategy
 - [x] Rate limiting — per-IP and global bucket keys
-- [x] Rate limiting — route-level config overrides global default
-- [x] Retry with fixed and exponential backoff
-- [x] Retry on configurable status codes
-- [x] Request header transforms (add/remove)
-- [x] Response header transforms (add/remove)
-- [x] Response body envelope wrapping
-- [x] Request body dot-notation mapping
-- [x] API key authentication (configurable header)
-- [x] Circuit breaker (threshold, window, cooldown, 503 response)
-- [x] Load balancing — round robin
-- [x] Load balancing — weighted round robin
+- [x] Route-level rate limit overrides the global default
+- [x] Retry with fixed and exponential backoff on configurable status codes
+- [x] Request header transforms (add and remove)
+- [x] Request body mapping — dot-notation destination paths, `$literal:` values, `$request_time`
+- [x] Response header transforms (add and remove)
+- [x] Response body envelope wrapping with `$body`, `$response_time`, `$route_path`
+- [x] API key authentication via configurable header
+- [x] Circuit breaker — trips after N failures in a window, returns 503 with `retry_after`
+- [x] Load balancing — round robin and weighted round robin across multiple upstream targets
 
 ## Not Implemented
 
-- Upstream health checks (background polling against `/healthz` — would need a goroutine-style background loop; deprioritized given time constraints)
-
-## Prerequisites
-
-- Python 3.10+
-- `pip install -r requirements.txt`
+- Upstream health checks (`health_check.path` / `interval` / `unhealthy_threshold`): requires a background polling loop per upstream target running outside the request path. Deprioritized in favor of completing the other resilience features cleanly. Documented in `DECISIONS.md`.
