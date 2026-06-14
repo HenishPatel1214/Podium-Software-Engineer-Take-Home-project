@@ -1,4 +1,6 @@
+import hmac
 import json
+import math
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -12,15 +14,24 @@ from rate_limiter import RateLimiter
 
 START_TIME = time.time()
 
+# Headers that describe the connection between two adjacent HTTP nodes and must
+# not be forwarded beyond them (RFC 7230 §6.1 + common extensions).
+_HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "proxy-connection",
+}
+
 
 def _find_route(config: Config, path: str) -> Route | None:
     """
-    Match incoming path to a configured route.
-    Exact prefix match — longer paths like /api/users/123 still match /api/users.
-    Returns the first matching route, or None.
+    Prefix-match the incoming path against configured routes.
+    Anchors on a '/' or '?' boundary so /api/users does not match /api/users-old.
+    Returns the first match, or None.
     """
     for route in config.routes:
-        if path == route.path or path.startswith(route.path + "/") or path.startswith(route.path + "?"):
+        if (path == route.path
+                or path.startswith(route.path + "/")
+                or path.startswith(route.path + "?")):
             return route
     return None
 
@@ -30,13 +41,6 @@ def _get_client_ip(handler) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return handler.client_address[0]
-
-
-def _rate_limit_key(route: Route, ip: str) -> str:
-    rl = route.rate_limit
-    if rl.per == "global":
-        return f"global:{route.path}"
-    return f"ip:{ip}:{route.path}"
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -61,7 +65,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def handle_request(self):
-        # Health endpoint is always available
+        # Health endpoint is always available regardless of config
         if self.path == "/health" or self.path.startswith("/health?"):
             uptime = int(time.time() - START_TIME)
             self.send_json(200, {"status": "healthy", "uptime_seconds": uptime})
@@ -76,18 +80,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.send_json(405, {"error": "method not allowed"})
             return
 
-        # Auth check
+        # Auth — constant-time comparison prevents timing side-channels
         if route.auth and route.auth.type == "api_key":
             provided = self.headers.get(route.auth.header, "")
-            if provided not in route.auth.keys:
+            if not any(hmac.compare_digest(provided, k) for k in route.auth.keys):
                 self.send_json(401, {"error": "unauthorized"})
                 return
 
-        # Rate limiting — route-level overrides global
+        # Rate limiting — route-level config overrides global; both respect .per
         rl_config = route.rate_limit or self.config.global_rate_limit
         if rl_config:
             ip = _get_client_ip(self)
-            key = _rate_limit_key(route, ip) if route.rate_limit else f"ip:{ip}:{route.path}"
+            key = (f"global:{route.path}" if rl_config.per == "global"
+                   else f"ip:{ip}:{route.path}")
             if not self.rate_limiter.is_allowed(key, rl_config):
                 self.send_json(429, {"error": "rate limit exceeded"})
                 return
@@ -97,10 +102,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if cb:
             is_open, remaining = cb.is_open()
             if is_open:
-                self.send_json(503, {"error": "service_unavailable", "retry_after": int(remaining) + 1})
+                self.send_json(503, {
+                    "error": "service_unavailable",
+                    "retry_after": math.ceil(remaining),
+                })
                 return
 
-        # Build upstream URL
+        # Build the upstream URL
         lb = self.load_balancers.get(route.path)
         target_base = lb.next_target() if lb else route.upstream.targets[0].url
 
@@ -112,8 +120,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         upstream_url = target_base.rstrip("/") + upstream_path
 
-        # Read request body
-        content_length = int(self.headers.get("Content-Length", 0))
+        # Read request body; treat missing or malformed Content-Length as 0
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_length = 0
         body = self.rfile.read(content_length) if content_length > 0 else None
 
         # Apply request transforms
@@ -124,25 +135,25 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 route.request_transform, headers, body, request_time
             )
 
-        # Determine timeout
+        # Determine effective timeout
         timeout = route.upstream.timeout or self.config.global_timeout
 
-        # Proxy with optional retry
+        # Forward to upstream (with retry if configured)
         status, resp_headers, resp_body = self._proxy_with_retry(
             upstream_url, headers, body, timeout, route, cb
         )
 
-        # Apply response transforms
-        if route.response_transform:
+        # Apply response transforms only for real upstream responses.
+        # Synthetic gateway errors (_proxy_with_retry returns {}) are never transformed.
+        if route.response_transform and resp_headers:
             resp_headers, resp_body = transform.apply_response_transform(
                 route.response_transform, resp_headers, resp_body, route.path, request_time
             )
 
-        # Send response
+        # Forward response to the client, stripping hop-by-hop headers
         self.send_response(status)
-        skip_headers = {"transfer-encoding", "connection"}
         for k, v in resp_headers.items():
-            if k.lower() not in skip_headers:
+            if k.lower() not in _HOP_BY_HOP:
                 self.send_header(k, v)
         self.send_header("Content-Length", str(len(resp_body)))
         self.end_headers()
@@ -160,7 +171,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 )
 
                 if retry and status in retry.on and attempt < attempts - 1:
-                    # This status code triggers a retry
                     if cb:
                         cb.record_failure()
                     time.sleep(delay)
@@ -168,7 +178,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         delay *= 2
                     continue
 
-                # Success path
+                # Inform the circuit breaker of the outcome
                 if cb:
                     if status >= 500:
                         cb.record_failure()
@@ -185,14 +195,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     if retry and retry.backoff == "exponential":
                         delay *= 2
                     continue
-                # All attempts exhausted
+                # All attempts exhausted — return a gateway-level error.
+                # Empty headers dict signals to handle_request that this is synthetic.
                 error_msg = "gateway timeout" if isinstance(e, TimeoutError) else "bad gateway"
                 code = 504 if isinstance(e, TimeoutError) else 502
                 return code, {}, json.dumps({"error": error_msg}).encode()
 
+        # Unreachable unless retry.attempts == 0 (invalid config)
         return 502, {}, json.dumps({"error": "bad gateway"}).encode()
 
-    # Map all HTTP methods to handle_request
     def do_GET(self): self.handle_request()
     def do_POST(self): self.handle_request()
     def do_PUT(self): self.handle_request()
@@ -203,7 +214,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
 
 def build_handler_class(config: Config):
-    """Inject config and stateful objects into the handler before the server starts."""
+    """Build a handler subclass with all stateful objects injected as class attributes."""
     rate_limiter = RateLimiter()
 
     circuit_breakers = {}

@@ -163,11 +163,20 @@ class TestAuth:
 # ── Circuit Breaker ───────────────────────────────────────────────────────────
 
 class TestCircuitBreaker:
-    def test_circuit_trips_after_failures(self):
-        # Send enough requests to trip the circuit (threshold=3 failures within window).
-        # Flaky alternates 200/503. We need to drive failures to threshold.
-        # Each failed request increments the counter on the cb.
-        # We'll hit it several times and expect the circuit to trip.
-        responses = [get("/api/circuit")[0] for _ in range(10)]
-        # Eventually we should get a 503 from the circuit breaker
-        assert 503 in responses
+    def test_circuit_trips_and_rejects_with_gateway_error(self):
+        # The /api/circuit upstream always returns 503 (always_fail mock).
+        # After threshold (3) failures, the circuit trips and the gateway
+        # returns its own rejection — distinguishable by the specific body.
+        for _ in range(3):
+            get("/api/circuit")  # these hit the upstream and record failures
+
+        # The 4th request must be rejected by the circuit breaker itself,
+        # not passed through to the upstream.
+        status, body = get("/api/circuit")
+        assert status == 503
+        assert body.get("error") == "service_unavailable", (
+            f"Expected circuit-breaker rejection body, got: {body}"
+        )
+        assert "retry_after" in body
+        assert isinstance(body["retry_after"], int)
+        assert body["retry_after"] > 0

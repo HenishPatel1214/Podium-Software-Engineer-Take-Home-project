@@ -22,6 +22,7 @@ UPSTREAM_PORT = 19001
 SLOW_PORT = 19002
 FLAKY_PORT = 19003
 AUTH_PORT = 19004
+ALWAYS_FAIL_PORT = 19005
 
 
 def _write_test_config(tmp_path: str) -> str:
@@ -118,11 +119,11 @@ def _write_test_config(tmp_path: str) -> str:
             methods: ["GET"]
             strip_prefix: false
             upstream:
-              url: "http://127.0.0.1:{FLAKY_PORT}"
+              url: "http://127.0.0.1:{ALWAYS_FAIL_PORT}"
             circuit_breaker:
               threshold: 3
               window: "60s"
-              cooldown: "5s"
+              cooldown: "30s"
     """)
     path = os.path.join(tmp_path, "test_gateway.yaml")
     with open(path, "w") as f:
@@ -140,6 +141,7 @@ def start_servers():
     start_mock_server(SLOW_PORT, "slow")
     start_mock_server(FLAKY_PORT, "flaky")
     start_mock_server(AUTH_PORT, "normal")
+    start_mock_server(ALWAYS_FAIL_PORT, "always_fail")
 
     # Start the gateway
     config = load_config(config_path)

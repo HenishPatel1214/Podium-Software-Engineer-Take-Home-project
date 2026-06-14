@@ -1,6 +1,5 @@
 import urllib.request
 import urllib.error
-import urllib.parse
 
 
 def forward(method: str, url: str, headers: dict, body: bytes | None, timeout: float):

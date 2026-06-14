@@ -35,6 +35,8 @@ def _make_handler(behavior: str):
                     self._respond(503, {"error": "temporarily unavailable"})
                 else:
                     self._respond(200, {"message": "ok"})
+            elif behavior == "always_fail":
+                self._respond(503, {"error": "upstream error"})
             elif behavior == "healthz":
                 if self.path == "/healthz":
                     self._respond(200, {"status": "ok"})
